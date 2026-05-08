@@ -6,10 +6,14 @@ Monitors wilaya availability and sends Telegram alerts.
 from __future__ import annotations
 import datetime as dt
 import os
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any
 import requests
+
+# Unbuffer stdout for Railway logs
+sys.stdout = open(sys.stdout.fileno(), mode='w', buffering=1)
 
 API_URL = "https://adhahi.dz/api/v1/public/wilaya-quotas"
 TARGET_WILAYA_CODES = ["21", "23", "24"]
