@@ -18,7 +18,7 @@ sys.stdout = open(sys.stdout.fileno(), mode='w', buffering=1)
 API_URL = "https://adhahi.dz/api/v1/public/wilaya-quotas"
 TARGET_WILAYA_CODES = ["21", "23", "24"]
 CHECK_INTERVAL_SECONDS = 60
-REQUEST_TIMEOUT_SECONDS = 12
+REQUEST_TIMEOUT_SECONDS = 30
 
 ADHAHI_COOKIE = os.getenv("ADHAHI_COOKIE", "").strip()
 TELEGRAM_ENABLED = os.getenv("TELEGRAM_ENABLED", "true").strip().lower() == "true"
@@ -77,37 +77,46 @@ def fetch_wilayas() -> list[WilayaQuota]:
     if ADHAHI_COOKIE:
         headers["Cookie"] = ADHAHI_COOKIE
     
-    response = requests.get(API_URL, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
-    
-    if response.status_code != 200:
-        content_type = response.headers.get("content-type", "")
-        preview = response.text[:220].replace("\n", " ")
-        raise RuntimeError(
-            f"HTTP {response.status_code}; content-type='{content_type}'; "
-            f"body-preview={preview!r}"
-        )
-    
-    content_type = response.headers.get("content-type", "")
-    if "application/json" not in content_type.lower():
-        preview = response.text[:200].replace("\n", " ")
-        raise RuntimeError(
-            f"Unexpected content-type '{content_type}'. Body preview: {preview!r}"
-        )
-    
-    payload = response.json()
-    if not isinstance(payload, list):
-        raise RuntimeError("Unexpected JSON shape: expected a list")
-    
-    wilayas: list[WilayaQuota] = []
-    for item in payload:
-        parsed = parse_wilaya(item)
-        if parsed is not None:
-            wilayas.append(parsed)
-    
-    if not wilayas:
-        raise RuntimeError("Parsed zero valid wilaya records")
-    
-    return wilayas
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(API_URL, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+            
+            if response.status_code != 200:
+                content_type = response.headers.get("content-type", "")
+                preview = response.text[:220].replace("\n", " ")
+                raise RuntimeError(
+                    f"HTTP {response.status_code}; content-type='{content_type}'; "
+                    f"body-preview={preview!r}"
+                )
+            
+            content_type = response.headers.get("content-type", "")
+            if "application/json" not in content_type.lower():
+                preview = response.text[:200].replace("\n", " ")
+                raise RuntimeError(
+                    f"Unexpected content-type '{content_type}'. Body preview: {preview!r}"
+                )
+            
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise RuntimeError("Unexpected JSON shape: expected a list")
+            
+            wilayas: list[WilayaQuota] = []
+            for item in payload:
+                parsed = parse_wilaya(item)
+                if parsed is not None:
+                    wilayas.append(parsed)
+            
+            if not wilayas:
+                raise RuntimeError("Parsed zero valid wilaya records")
+            
+            return wilayas
+        except requests.RequestException as exc:
+            if attempt < max_retries - 1:
+                print(f"[{ts()}] Retry {attempt + 1}/{max_retries}: {exc}", flush=True)
+                time.sleep(2)
+            else:
+                raise
 
 def find_target(wilayas: list[WilayaQuota], code: str) -> WilayaQuota | None:
     for wilaya in wilayas:
@@ -119,7 +128,7 @@ def send_telegram_message(message: str) -> None:
     if not TELEGRAM_ENABLED:
         return
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print(f"[{ts()}] WARN: Telegram enabled but token/chat_id missing.")
+        print(f"[{ts()}] WARN: Telegram enabled but token/chat_id missing.", flush=True)
         return
     
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -135,17 +144,19 @@ def send_telegram_message(message: str) -> None:
             preview = resp.text[:200].replace("\n", " ")
             print(
                 f"[{ts()}] WARN: Telegram send failed HTTP {resp.status_code}; "
-                f"body-preview={preview!r}"
+                f"body-preview={preview!r}",
+                flush=True
             )
     except requests.RequestException as exc:
-        print(f"[{ts()}] WARN: Telegram request failed: {exc}")
+        print(f"[{ts()}] WARN: Telegram request failed: {exc}", flush=True)
 
 def main() -> None:
     previous_available: dict[str, bool] = {}
     
     print(
         f"[{ts()}] Starting watcher. Target wilayaCodes={','.join(TARGET_WILAYA_CODES)}, "
-        f"interval={CHECK_INTERVAL_SECONDS}s"
+        f"interval={CHECK_INTERVAL_SECONDS}s",
+        flush=True
     )
     
     send_telegram_message(
@@ -161,7 +172,8 @@ def main() -> None:
                 if target is None:
                     print(
                         f"[{ts()}] WARN: Target wilayaCode={code} not found "
-                        f"in API response (records={len(wilayas)})."
+                        f"in API response (records={len(wilayas)}).",
+                        flush=True
                     )
                     continue
                 
@@ -169,13 +181,15 @@ def main() -> None:
                     previous_available[code] = target.available
                     print(
                         f"[{ts()}] Baseline set -> {target.wilaya_code} "
-                        f"({target.name_fr} / {target.name_ar}) available={target.available}"
+                        f"({target.name_fr} / {target.name_ar}) available={target.available}",
+                        flush=True
                     )
                 else:
                     if (not previous_available[code]) and target.available:
                         print(
                             f"[{ts()}] AVAILABLE: {target.wilaya_code} "
-                            f"({target.name_fr} / {target.name_ar}) changed false -> true"
+                            f"({target.name_fr} / {target.name_ar}) changed false -> true",
+                            flush=True
                         )
                         send_telegram_message(
                             f"Adhahi AVAILABLE: Wilaya {target.wilaya_code} "
@@ -184,16 +198,17 @@ def main() -> None:
                     else:
                         print(
                             f"[{ts()}] Heartbeat: {target.wilaya_code} "
-                            f"available={target.available}"
+                            f"available={target.available}",
+                            flush=True
                         )
                     previous_available[code] = target.available
         
         except requests.RequestException as exc:
-            print(f"[{ts()}] ERROR: Network/request issue: {exc}")
+            print(f"[{ts()}] ERROR: Network/request issue: {exc}", flush=True)
         except ValueError as exc:
-            print(f"[{ts()}] ERROR: Failed to parse JSON: {exc}")
+            print(f"[{ts()}] ERROR: Failed to parse JSON: {exc}", flush=True)
         except Exception as exc:
-            print(f"[{ts()}] ERROR: {exc}")
+            print(f"[{ts()}] ERROR: {exc}", flush=True)
         
         time.sleep(CHECK_INTERVAL_SECONDS)
 
